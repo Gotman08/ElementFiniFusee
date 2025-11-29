@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build/Output
+*.egg-info/
+dist/
+build/
+
+# Fichiers temporaires
+*.tmp
+*.bak
+
+# Fichiers de test
+reentry_profile_test.png
