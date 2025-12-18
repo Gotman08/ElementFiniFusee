@@ -28,16 +28,17 @@ Usage:
 
 Configuration can be modified by editing the parameter section in main().
 """
+import argparse
 import numpy as np
 import os
 import sys
 
 from src.mesh.mesh_reader import read_gmsh_mesh, create_node_mapping
-from src.physics.reentry_profile import generate_coupled_reentry
+from src.physics.reentry_profile import generate_coupled_reentry, adaptive_frame_sampling
 from src.visualization.animation import compute_all_frames, create_animation
 
 
-def main():
+def main(include_radiation=True):
     """
     @brief Main function orchestrating the live reentry demonstration.
 
@@ -94,6 +95,7 @@ def main():
     print(f"  - Angle d'entree:       {gamma_initial:.0f} degres")
     print(f"  - FPS:                  {fps}")
     print(f"  - Temperature base:     {T_base:.0f} K")
+    print(f"  - Radiation cooling:    {'ACTIVEE' if include_radiation else 'DESACTIVEE'}")
     if export_video:
         print(f"  - Export video:         OUI (.{video_format})")
     else:
@@ -121,14 +123,11 @@ def main():
         A=10.0
     )
 
-    # Sous-échantillonner pour l'animation (max 100 frames)
-    n_points = len(times)
-    if n_points > 100:
-        step = n_points // 100
-        times = times[::step]
-        velocities = velocities[::step]
-        altitudes = altitudes[::step]
-        heat_flux = heat_flux[::step]
+    # Échantillonnage adaptatif pour l'animation (max 150 frames)
+    # Beaucoup plus de frames pendant la phase de chauffage critique
+    times, velocities, altitudes, heat_flux = adaptive_frame_sampling(
+        times, velocities, altitudes, heat_flux, max_frames=150
+    )
 
     print(f"[OK] Profil physique genere:")
     print(f"     - Altitude: {altitudes[0]/1000:.1f} km -> {altitudes[-1]/1000:.1f} km")
@@ -156,7 +155,9 @@ def main():
         mesh=mesh,
         node_to_dof=node_to_dof,
         velocity_profile=(times, velocities),
-        base_temperature=T_base
+        altitudes=altitudes,
+        base_temperature=T_base,
+        include_radiation=include_radiation
     )
 
     print()
@@ -213,8 +214,20 @@ def main():
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='Animation de rentrée atmosphérique avec analyse thermique FEM'
+    )
+    parser.add_argument(
+        '--no-radiation',
+        action='store_true',
+        help='Désactiver le refroidissement radiatif (modèle linéaire uniquement)'
+    )
+    args = parser.parse_args()
+
+    include_radiation = not args.no_radiation
+
     try:
-        main()
+        main(include_radiation=include_radiation)
     except KeyboardInterrupt:
         print("\n\n[WARNING] Interruption par l'utilisateur")
         sys.exit(0)

@@ -11,14 +11,35 @@ from matplotlib.patches import Rectangle
 import time
 
 from src.mesh.mesh_reader import Mesh
-from src.physics.parametric_study import compute_aerothermal_parameters, KAPPA_material
-from src.core.assembly import assemble_global_system
+from src.physics.parametric_study import compute_aerothermal_parameters, KAPPA_material, T_inf
+from src.core.nonlinear_solver import picard_iteration
 from src.core.boundary_conditions import apply_dirichlet_conditions
 from src.core.solver import solve_linear_system
 
 
-def compute_all_frames(mesh, node_to_dof, velocity_profile, base_temperature=300.0):
-    """Pre-compute temperature solutions for all frames."""
+def compute_all_frames(mesh, node_to_dof, velocity_profile, altitudes, base_temperature=300.0, include_radiation=True):
+    """
+    Pre-compute temperature solutions for all frames.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        Finite element mesh
+    node_to_dof : Dict[int, int]
+        Node to DOF mapping
+    velocity_profile : Tuple[np.ndarray, np.ndarray]
+        (times, velocities) arrays
+    altitudes : np.ndarray
+        Altitude profile [m] corresponding to velocity_profile
+    base_temperature : float
+        Base temperature for Dirichlet BC [K]
+    include_radiation : bool
+        Enable radiation cooling (default: True for realistic temperatures)
+
+    Returns
+    -------
+    times, velocities, solutions, T_max_list
+    """
     times, velocities = velocity_profile
     n_frames = len(times)
 
@@ -29,23 +50,50 @@ def compute_all_frames(mesh, node_to_dof, velocity_profile, base_temperature=300
     print("PRE-CALCUL DES SOLUTIONS POUR L'ANIMATION")
     print("=" * 70)
     print(f"Nombre de frames: {n_frames}")
+    print(f"Physique de radiation: {'ACTIVEE (temperatures realistes)' if include_radiation else 'DESACTIVEE'}")
+    print(f"Couplage altitude-temperature: ACTIF")
     print()
 
     start_time = time.time()
 
-    for idx, (t, V) in enumerate(zip(times, velocities)):
+    for idx, (t, V, h) in enumerate(zip(times, velocities, altitudes)):
         progress = (idx + 1) / n_frames * 100
-        print(f"\r[{idx+1}/{n_frames}] Frame {idx+1} | V = {V:.0f} m/s | {progress:.1f}%", end='')
+        print(f"\r[{idx+1}/{n_frames}] Frame {idx+1} | h={h/1000:.0f} km, V={V:.0f} m/s | {progress:.1f}%", end='')
 
-        alpha, u_E = compute_aerothermal_parameters(V)
+        # Get altitude-corrected aerothermal parameters
+        from src.physics.parametric_study import compute_altitude_corrected_parameters
+        alpha, u_E, epsilon, sigma = compute_altitude_corrected_parameters(V, h)
 
         robin_boundaries = {1: (alpha, u_E)}
-        A, F = assemble_global_system(mesh, node_to_dof, KAPPA_material, robin_boundaries)
 
-        dirichlet_boundaries = {2: base_temperature}
-        A_bc, F_bc = apply_dirichlet_conditions(A, F, mesh, node_to_dof, dirichlet_boundaries)
+        # Check if Dirichlet BC physical group exists
+        dirichlet_boundaries = {}
+        if 2 in mesh.physical_groups:
+            dirichlet_boundaries = {2: base_temperature}
 
-        U = solve_linear_system(A_bc, F_bc, method='direct')
+        if include_radiation:
+            # Use nonlinear solver with radiation
+            radiation_boundaries = {1: (epsilon, T_inf, sigma)}
+
+            U, info = picard_iteration(
+                mesh, node_to_dof, KAPPA_material,
+                robin_boundaries, radiation_boundaries,
+                dirichlet_boundaries=dirichlet_boundaries if dirichlet_boundaries else None,
+                max_iter=100,
+                tol_abs=10.0,
+                tol_rel=1e-3,
+                relaxation=0.3,
+                verbose=False
+            )
+        else:
+            # Use linear solver (convection only, for comparison)
+            from src.core.assembly import assemble_global_system
+            A, F = assemble_global_system(mesh, node_to_dof, KAPPA_material, robin_boundaries)
+            if dirichlet_boundaries:
+                A_bc, F_bc = apply_dirichlet_conditions(A, F, mesh, node_to_dof, dirichlet_boundaries)
+            else:
+                A_bc, F_bc = A.copy(), F.copy()
+            U = solve_linear_system(A_bc, F_bc, method='direct')
 
         solutions.append(U)
         T_max_list.append(np.max(U))
@@ -171,6 +219,12 @@ def create_animation(mesh, node_to_dof, times, velocities, solutions, T_max_list
     horizontal_range = x_positions[-1] - x_positions[0]
     x_positions = x_positions - x_positions[0] - horizontal_range / 2
 
+    # Calculer distance totale parcourue (3D : horizontal + vertical)
+    dx = np.diff(x_positions, prepend=x_positions[0])
+    dh = np.diff(altitudes_km, prepend=altitudes_km[0])
+    ds = np.sqrt(dx**2 + dh**2)  # Distance élémentaire [km]
+    distance_traveled_km = np.cumsum(ds)  # Distance cumulée [km]
+
     T_min_global = min([np.min(U) for U in solutions])
     T_max_global = max([np.max(U) for U in solutions])
 
@@ -188,17 +242,25 @@ def create_animation(mesh, node_to_dof, times, velocities, solutions, T_max_list
     print()
 
     # Create figure
-    fig = plt.figure(figsize=(18, 12))
-    gs = fig.add_gridspec(4, 4, hspace=0.35, wspace=0.3)
+    fig = plt.figure(figsize=(20, 14))  # Légèrement plus grand pour panneau thermal
+    gs = fig.add_gridspec(4, 4,
+                          height_ratios=[3, 3, 1.5, 1.5],  # Plus d'espace pour trajectoire
+                          hspace=0.4, wspace=0.3)
 
-    ax_main = fig.add_subplot(gs[:, :3])
+    # Trajectoire (2 lignes supérieures, 3 colonnes gauche)
+    ax_main = fig.add_subplot(gs[0:2, :3])
+
+    # NOUVEAU: Panneau thermal mesh (2 lignes inférieures, 3 colonnes gauche)
+    ax_thermal = fig.add_subplot(gs[2:4, :3])
+
+    # Barre latérale droite (inchangée mais ajustée)
     ax_velocity = fig.add_subplot(gs[0, 3])
     ax_altitude = fig.add_subplot(gs[1, 3])
     ax_temperature = fig.add_subplot(gs[2, 3])
     ax_info = fig.add_subplot(gs[3, 3])
     ax_info.axis('off')
 
-    fig.suptitle('RENTREE ATMOSPHERIQUE ARIANE 5 - RE-ENTRY CORRIDOR',
+    fig.suptitle('RENTREE ATMOSPHERIQUE ARIANE 5 - Visualisation Thermique Detaillee',
                  fontsize=16, fontweight='bold', color='white')
     fig.patch.set_facecolor('#1a1a2e')
 
@@ -264,11 +326,70 @@ def create_animation(mesh, node_to_dof, times, velocities, solutions, T_max_list
                              family='monospace', color='white')
     ax_info.set_facecolor('#1a1a2e')
 
+    # ============================================================================
+    # THERMAL MESH PANEL SETUP
+    # ============================================================================
+
+    # Configure thermal panel appearance
+    ax_thermal.set_facecolor('#0a0a0a')  # Fond sombre pour contraste
+    ax_thermal.set_xlabel('Position axiale (m)', fontsize=10, color='white')
+    ax_thermal.set_ylabel('Position radiale (m)', fontsize=10, color='white')
+    ax_thermal.set_title('Distribution de temperature - Maillage elements finis',
+                         fontsize=11, color='white', fontweight='bold')
+    ax_thermal.tick_params(colors='white', labelsize=9)
+    ax_thermal.set_aspect('equal')
+
+    # Extract native mesh coordinates (right half only)
+    x_thermal_right = []
+    y_thermal_right = []
+    for node_id, dof in node_to_dof.items():
+        coords = mesh.nodes[node_id]
+        x_thermal_right.append(coords[0])  # Position axiale
+        y_thermal_right.append(coords[1])  # Position radiale
+
+    x_thermal_right = np.array(x_thermal_right)
+    y_thermal_right = np.array(y_thermal_right)
+    n_nodes_thermal = len(x_thermal_right)
+
+    # CREATE MIRROR SYMMETRY (like trajectory panel)
+    x_thermal_left = -x_thermal_right  # Mirror along Y-axis
+    y_thermal_left = y_thermal_right   # Same radial coordinate
+
+    # Concatenate left and right halves for full rocket
+    x_thermal = np.concatenate([x_thermal_left, x_thermal_right])
+    y_thermal = np.concatenate([y_thermal_left, y_thermal_right])
+
+    # Build triangulation with symmetry
+    triangles_thermal_right = []
+    for elem in mesh.get_triangles().values():
+        tri_nodes = [node_to_dof[nid] for nid in elem['nodes'] if nid in node_to_dof]
+        if len(tri_nodes) == 3:
+            triangles_thermal_right.append(tri_nodes)
+
+    # CREATE MIRROR TRIANGLES (indices offset by n_nodes_thermal, order reversed)
+    triangles_thermal_left = [[tri[0] + n_nodes_thermal, tri[2] + n_nodes_thermal, tri[1] + n_nodes_thermal]
+                              for tri in triangles_thermal_right]
+    triangles_thermal = triangles_thermal_left + triangles_thermal_right
+
+    triang_thermal = tri.Triangulation(x_thermal, y_thermal, triangles_thermal)
+
+    # Set mesh bounds with padding
+    x_min, x_max = x_thermal.min(), x_thermal.max()
+    y_min, y_max = y_thermal.min(), y_thermal.max()
+    padding_x = (x_max - x_min) * 0.05
+    padding_y = (y_max - y_min) * 0.1
+    ax_thermal.set_xlim(x_min - padding_x, x_max + padding_x)
+    ax_thermal.set_ylim(y_min - padding_y, y_max + padding_y)
+
+    # Initialize lists for thermal artists
+    thermal_artists = []
+    thermal_cbar_initialized = False
+
     # Store artists to remove
     artists_to_remove = []
 
     def update(frame):
-        nonlocal artists_to_remove
+        nonlocal artists_to_remove, thermal_artists, thermal_cbar_initialized
 
         # Remove previous frame's artists
         for artist in artists_to_remove:
@@ -290,7 +411,13 @@ def create_animation(mesh, node_to_dof, times, velocities, solutions, T_max_list
         triang = tri.Triangulation(x_frame, y_frame, triangles)
 
         # Get temperatures
-        T_frame_right = np.array([solutions[frame][dof] for node_id, dof in node_to_dof.items()])
+        try:
+            T_frame_right = np.array([solutions[frame][dof] for node_id, dof in node_to_dof.items()])
+        except KeyError as e:
+            raise ValueError(
+                f"node_to_dof mapping inconsistent: clé manquante {e}. "
+                f"Vérifier l'assembly du système."
+            )
         T_frame = np.concatenate([T_frame_right, T_frame_right])
 
         # Draw rocket with temperature colors
@@ -304,6 +431,87 @@ def create_animation(mesh, node_to_dof, times, velocities, solutions, T_max_list
         # Draw rocket outline
         lines = ax_main.triplot(triang, 'w-', linewidth=0.4, alpha=0.6)
         artists_to_remove.extend(lines)
+
+        # ========================================================================
+        # UPDATE THERMAL MESH PANEL
+        # ========================================================================
+
+        # Clear previous thermal artists
+        for artist in thermal_artists:
+            try:
+                artist.remove()
+            except:
+                pass
+        thermal_artists.clear()
+
+        # Get current temperature field (right half only from solution)
+        T_thermal_right = np.array([solutions[frame][dof] for node_id, dof in node_to_dof.items()])
+
+        # DUPLICATE for symmetric display (left half has same temperatures)
+        T_thermal = np.concatenate([T_thermal_right, T_thermal_right])
+
+        # Draw filled contours with 30 levels for smooth gradients
+        thermal_contour = ax_thermal.tricontourf(
+            triang_thermal, T_thermal,
+            levels=30,
+            cmap='RdYlBu_r',  # Rouge=chaud, Bleu=froid
+            vmin=T_min_global,
+            vmax=T_max_global,
+            extend='both'
+        )
+
+        # Store contour collections
+        if hasattr(thermal_contour, 'collections'):
+            thermal_artists.extend(thermal_contour.collections)
+
+        # Overlay mesh wireframe (thin white lines)
+        thermal_wireframe = ax_thermal.triplot(
+            triang_thermal,
+            'w-',
+            linewidth=0.3,
+            alpha=0.25
+        )
+        thermal_artists.extend(thermal_wireframe)
+
+        # Temperature annotation (min/max on mesh)
+        T_min_current = np.min(T_thermal)
+        T_max_current = np.max(T_thermal)
+        temp_annotation = ax_thermal.text(
+            0.02, 0.98,
+            f'T_min: {T_min_current:.0f} K ({T_min_current-273.15:.0f}°C)\n'
+            f'T_max: {T_max_current:.0f} K ({T_max_current-273.15:.0f}°C)',
+            transform=ax_thermal.transAxes,
+            fontsize=9,
+            color='white',
+            verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='black', alpha=0.7, edgecolor='white')
+        )
+        thermal_artists.append(temp_annotation)
+
+        # Velocity indicator on thermal panel
+        V = velocities[frame]
+        vel_annotation = ax_thermal.text(
+            0.98, 0.98,
+            f'V = {V:.0f} m/s',
+            transform=ax_thermal.transAxes,
+            fontsize=10,
+            color='cyan',
+            verticalalignment='top',
+            horizontalalignment='right',
+            fontweight='bold',
+            bbox=dict(boxstyle='round', facecolor='black', alpha=0.7, edgecolor='cyan')
+        )
+        thermal_artists.append(vel_annotation)
+
+        # Initialize colorbar on first frame
+        if not thermal_cbar_initialized:
+            thermal_cbar = plt.colorbar(thermal_contour, ax=ax_thermal,
+                                        orientation='vertical',
+                                        fraction=0.046, pad=0.04)
+            thermal_cbar.set_label('Temperature (K)', rotation=270, labelpad=20,
+                                   color='white', fontsize=10)
+            thermal_cbar.ax.tick_params(colors='white', labelsize=8)
+            thermal_cbar_initialized = True
 
         # Update trajectory trail
         trail_line.set_data(x_positions[:frame+1], altitudes_km[:frame+1])
@@ -325,7 +533,7 @@ def create_animation(mesh, node_to_dof, times, velocities, solutions, T_max_list
         info_str = f"""
   Temps:      {t:6.1f} s
   Altitude:   {alt_km:6.1f} km
-  Distance:   {-x_pos:6.1f} km
+  Distance:   {distance_traveled_km[frame]:6.1f} km
   Vitesse:    {V:6.0f} m/s
   T_max:      {T_max:6.0f} K
               ({T_max - 273.15:6.0f} C)

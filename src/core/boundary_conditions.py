@@ -104,9 +104,12 @@ def apply_dirichlet_conditions(A: csr_matrix,
     logger.info(f"Application de {len(dirichlet_dofs)} conditions de Dirichlet...")
 
     for dof, value in zip(dirichlet_dofs, dirichlet_values):
-        for i in range(A_bc.shape[0]):
-            if i != dof:
-                F_bc[i] -= A_bc[i, dof] * value
+        # Extract column efficiently from sparse matrix
+        col = A_bc.getcol(dof).toarray().flatten()
+        # Vectorized update (avoids O(N) loop)
+        F_bc -= col * value
+        # Restore diagonal contribution (was subtracted above)
+        F_bc[dof] += col[dof] * value
 
         A_bc[dof, :] = 0
         A_bc[dof, dof] = 1

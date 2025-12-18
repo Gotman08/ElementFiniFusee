@@ -36,6 +36,7 @@ Usage:
 
 Configuration can be modified by editing the parameter section in main().
 """
+import argparse
 import logging
 import numpy as np
 import os
@@ -57,7 +58,7 @@ from src.visualization.plotting import (plot_parametric_curve, plot_temperature_
                                         plot_multiple_temperature_fields, export_results_to_csv)
 
 
-def main():
+def main(include_radiation=True, output_file=None):
     """
     @brief Main function orchestrating the complete parametric study.
 
@@ -147,7 +148,8 @@ def main():
         mesh_file=mesh_file,
         velocity_range=velocity_range,
         base_temperature=T_base,
-        mode=MODE
+        mode=MODE,
+        include_radiation=include_radiation
     )
 
     print()
@@ -234,7 +236,7 @@ def main():
         show=False
     )
 
-    csv_file = "data/output/csv/results_parametric_study.csv"
+    csv_file = output_file if output_file else "data/output/csv/results_parametric_study.csv"
     os.makedirs(os.path.dirname(csv_file), exist_ok=True)
     export_results_to_csv(velocities, T_max_list, csv_file)
 
@@ -268,8 +270,26 @@ def main():
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='Étude paramétrique thermique FEM pour rentrée atmosphérique'
+    )
+    parser.add_argument(
+        '--no-radiation',
+        action='store_true',
+        help='Désactiver le refroidissement radiatif (modèle linéaire uniquement)'
+    )
+    parser.add_argument(
+        '--output',
+        type=str,
+        default=None,
+        help='Fichier CSV de sortie pour les résultats (optionnel)'
+    )
+    args = parser.parse_args()
+
+    include_radiation = not args.no_radiation
+
     try:
-        main()
+        main(include_radiation=include_radiation, output_file=args.output)
     except KeyboardInterrupt:
         logger.warning("Interruption par l'utilisateur")
         sys.exit(0)

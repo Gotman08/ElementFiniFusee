@@ -83,6 +83,12 @@ def solve_linear_system(A: csr_matrix,
 
     if method == 'direct':
         U = spsolve(A, F)
+        # Validate return type (spsolve can return sparse matrix if singular)
+        if not isinstance(U, np.ndarray):
+            raise SolverError(
+                f"spsolve a retourné {type(U)} au lieu de ndarray. "
+                f"La matrice peut être singulière."
+            )
 
     elif method == 'cg':
         U, info = cg(A, F, tol=1e-8, maxiter=1000)
