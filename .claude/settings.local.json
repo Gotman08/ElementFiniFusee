@@ -6,7 +6,10 @@
       "Bash(git init:*)",
       "Bash(gh repo create:*)",
       "Bash(git add:*)",
-      "Bash(git commit -m \"$(cat <<''EOF''\nInitial commit - Analyse thermique fusee par elements finis\n\n- Implementation complete EF P1 avec conditions de Robin\n- Etude parametrique en vitesse\n- Animation live rentree atmospherique\n- Maillage Ariane 5 avec boosters\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
+      "Bash(git commit -m \"$(cat <<''EOF''\nInitial commit - Analyse thermique fusee par elements finis\n\n- Implementation complete EF P1 avec conditions de Robin\n- Etude parametrique en vitesse\n- Animation live rentree atmospherique\n- Maillage Ariane 5 avec boosters\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(python3:*)",
+      "Bash(wc:*)",
+      "Bash(PYTHONPATH=. python3:*)"
     ],
     "deny": [],
     "ask": []
