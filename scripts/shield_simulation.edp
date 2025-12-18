@@ -1,0 +1,339 @@
+// =========================================================================
+// SIMULATION THERMIQUE D'UN BOUCLIER DE RENTREE ATMOSPHERIQUE
+// =========================================================================
+// Master CHPS - Universite de Reims Champagne-Ardenne
+// Projet d'Introduction aux Elements Finis
+//
+// Equation: -div(Ka * grad(u)) = f(x,y)  dans Omega
+//
+// Conditions aux limites:
+//   - Neumann (GammaN):       -Ka * du/dn = 0
+//   - Fourier-Robin (GammaF): -Ka * du/dn = alpha * (u - uE)
+//   - Dirichlet (GammaD):     u = uD  (via penalisation beta)
+// =========================================================================
+
+// -------------------------------------------------------------------------
+// SECTION 1: CONSTANTES PHYSIQUES
+// -------------------------------------------------------------------------
+real Ka = 0.026;              // Conductivite thermique de l'air [W/(m.K)]
+real uD = 293.15;             // Temperature de reference (20 C) [K]
+real beta = 1e8;              // Coefficient de penalisation Dirichlet
+real Mach1 = 343.0;           // Vitesse du son [m/s]
+
+// Contraintes de temperature au point critique (0,0)
+// u(0,0) doit etre dans [-150 C, +150 C]
+real TminK = 123.15;          // -150 C en Kelvin
+real TmaxK = 423.15;          // +150 C en Kelvin
+
+// -------------------------------------------------------------------------
+// SECTION 2: PARAMETRES DE L'ETUDE PARAMETRIQUE
+// -------------------------------------------------------------------------
+
+// Materiaux du bouclier thermique [Kb en W/(m.K)]
+int nMat = 3;
+real[int] KbValues = [0.2, 1.5, 120.0];  // PICA, Ceramique, Carbone-Carbone
+string[int] MaterialNames(nMat);
+MaterialNames[0] = "PICA";
+MaterialNames[1] = "Ceramique";
+MaterialNames[2] = "CarboneCarbone";
+
+// Epaisseurs du bouclier [m]
+int nThick = 5;
+real[int] eValues = [0.005, 0.01, 0.02, 0.03, 0.05];
+
+// Plage de vitesses (nombre de Mach)
+int MachMin = 1;
+int MachMax = 25;
+
+// -------------------------------------------------------------------------
+// SECTION 3: GEOMETRIE DU DOMAINE
+// -------------------------------------------------------------------------
+// Le domaine represente une coupe du vehicule spatial:
+// - Corps rectangulaire (partie superieure)
+// - Retrecissement par parois inclinees vers un col
+// - Arc de cercle formant le bouclier thermique (partie inferieure)
+// - Origine (0,0) au centre du bas du bouclier
+
+// Dimensions [m]
+real R = 0.5;           // Rayon du bouclier (demi-largeur en bas)
+real H1 = 0.3;          // Hauteur de la section inclinee (col)
+real H2 = 0.8;          // Hauteur du corps rectangulaire
+real W1 = 0.2;          // Demi-largeur au niveau du col
+real W2 = 0.5;          // Demi-largeur en haut (= R pour continuite)
+
+// Densite du maillage
+int n1 = 40;            // Points sur l'arc du bouclier (GammaF)
+int n2 = 15;            // Points sur les parois inclinees (GammaF)
+int n3 = 25;            // Points sur les flancs verticaux (GammaN)
+int n4 = 20;            // Points sur le bord superieur (GammaD)
+
+// Labels des frontieres
+// 1 = GammaF (Fourier-Robin) - bouclier et parties inclinees
+// 2 = GammaN (Neumann) - flancs verticaux adiabatiques
+// 3 = GammaD (Dirichlet) - base superieure
+
+// Definition des frontieres avec border
+// Arc du bouclier (demi-cercle en bas) - GammaF
+border GammaFarc(t=0, pi) {
+    x = R * cos(pi - t);      // De (-R, 0) a (R, 0) en passant par (0, -R)
+    y = -R * sin(pi - t);     // Sous y=0, minimum a y=-R
+    label = 1;
+}
+
+// Paroi inclinee droite - GammaF (compression gazeuse)
+border GammaFright(t=0, 1) {
+    x = R + (W1 - R) * t;     // De R a W1
+    y = H1 * t;               // De 0 a H1
+    label = 1;
+}
+
+// Flanc vertical droit - GammaN (adiabatique)
+border GammaNright(t=0, 1) {
+    x = W1;
+    y = H1 + H2 * t;          // De H1 a H1+H2
+    label = 2;
+}
+
+// Bord superieur - GammaD (Dirichlet)
+border GammaD(t=0, 1) {
+    x = W1 - 2 * W1 * t;      // De W1 a -W1
+    y = H1 + H2;
+    label = 3;
+}
+
+// Flanc vertical gauche - GammaN (adiabatique)
+border GammaNleft(t=0, 1) {
+    x = -W1;
+    y = H1 + H2 - H2 * t;     // De H1+H2 a H1
+    label = 2;
+}
+
+// Paroi inclinee gauche - GammaF (compression gazeuse)
+border GammaFleft(t=0, 1) {
+    x = -W1 + (W1 - R) * t;   // De -W1 a -R
+    y = H1 * (1 - t);         // De H1 a 0
+    label = 1;
+}
+
+// -------------------------------------------------------------------------
+// SECTION 4: CREATION DU MAILLAGE
+// -------------------------------------------------------------------------
+mesh Th = buildmesh(
+    GammaFarc(n1) +
+    GammaFright(n2) +
+    GammaNright(n3) +
+    GammaD(n4) +
+    GammaNleft(n3) +
+    GammaFleft(n2)
+);
+
+// Afficher les statistiques du maillage
+cout << "========================================" << endl;
+cout << "MAILLAGE GENERE" << endl;
+cout << "========================================" << endl;
+cout << "  Nombre de sommets:   " << Th.nv << endl;
+cout << "  Nombre de triangles: " << Th.nt << endl;
+cout << "  Nombre d'aretes:     " << Th.nbe << endl;
+cout << "========================================" << endl;
+
+// Visualiser le maillage
+plot(Th, wait=0, cmm="Maillage du domaine Omega");
+
+// -------------------------------------------------------------------------
+// SECTION 5: ESPACE ELEMENTS FINIS
+// -------------------------------------------------------------------------
+fespace Vh(Th, P1);       // Elements finis P1 (lineaires)
+Vh u, v;                  // Solution u et fonction test v
+
+// -------------------------------------------------------------------------
+// SECTION 6: TERME SOURCE
+// -------------------------------------------------------------------------
+// f(x,y) = -0.5 * exp(-(x^2 + y^2) / 4)
+// Modelise l'air climatise localise autour de la coiffe
+func f = -0.5 * exp(-(x^2 + y^2) / 4.0);
+
+// -------------------------------------------------------------------------
+// SECTION 7: FICHIERS DE SORTIE
+// -------------------------------------------------------------------------
+// Creer le repertoire de sortie si necessaire
+// system("mkdir -p ../data/output/csv");
+
+// Fichier de resultats detailles
+ofstream fdetail("../data/output/csv/shield_results_detail.csv");
+fdetail << "Material,Kb_W_mK,Thickness_m,Mach,Velocity_m_s,alpha_W_m2K,uE_K,T_origin_K,T_origin_C,Valid" << endl;
+
+// Fichier de synthese (Vmax par configuration)
+ofstream fsynthesis("../data/output/csv/shield_Vmax_synthesis.csv");
+fsynthesis << "Material,Kb_W_mK,Thickness_m,Vmax_m_s,Vmax_Mach" << endl;
+
+// -------------------------------------------------------------------------
+// SECTION 8: BOUCLE PARAMETRIQUE PRINCIPALE
+// -------------------------------------------------------------------------
+cout << endl;
+cout << "========================================" << endl;
+cout << "DEBUT DE L'ETUDE PARAMETRIQUE" << endl;
+cout << "========================================" << endl;
+
+// Variables pour stocker les resultats
+real alpha, uE, V, T00, T00C;
+bool valid;
+real VmaxValid;
+int MachVmax;
+
+// Boucle sur les materiaux
+for (int iMat = 0; iMat < nMat; iMat++) {
+    real Kb = KbValues[iMat];
+    string matName = MaterialNames[iMat];
+
+    cout << endl;
+    cout << "========================================" << endl;
+    cout << "MATERIAU: " << matName << " (Kb = " << Kb << " W/(m.K))" << endl;
+    cout << "========================================" << endl;
+
+    // Boucle sur les epaisseurs
+    for (int iE = 0; iE < nThick; iE++) {
+        real e = eValues[iE];
+        alpha = Kb / e;        // Coefficient de transfert thermique
+
+        cout << endl;
+        cout << "  Epaisseur e = " << e << " m  =>  alpha = " << alpha << " W/(m^2.K)" << endl;
+        cout << "  ------------------------------------------------" << endl;
+
+        VmaxValid = 0;
+        MachVmax = 0;
+
+        // Boucle sur les vitesses
+        for (int iMach = MachMin; iMach <= MachMax; iMach++) {
+            V = iMach * Mach1;
+            uE = 1e-5 * V * V;     // Temperature exterieure [K]
+
+            // -----------------------------------------------------------
+            // RESOLUTION DU PROBLEME THERMIQUE
+            // -----------------------------------------------------------
+            // Formulation variationnelle:
+            // a(u,v) = int_Omega Ka grad(u).grad(v) dOmega
+            //        + int_GammaF alpha u v ds
+            //        + int_GammaD beta u v ds
+            //
+            // L(v) = int_Omega f v dOmega
+            //      + int_GammaF alpha uE v ds
+            //      + int_GammaD beta uD v ds
+            // -----------------------------------------------------------
+
+            solve Thermal(u, v) =
+                // Terme de diffusion volumique
+                int2d(Th)(Ka * (dx(u)*dx(v) + dy(u)*dy(v)))
+
+                // Condition de Robin sur GammaF (label=1)
+                + int1d(Th, 1)(alpha * u * v)
+
+                // Condition de Dirichlet par penalisation sur GammaD (label=3)
+                + int1d(Th, 3)(beta * u * v)
+
+                // Terme source f(x,y)
+                - int2d(Th)(f * v)
+
+                // Contribution Robin au second membre
+                - int1d(Th, 1)(alpha * uE * v)
+
+                // Contribution Dirichlet au second membre
+                - int1d(Th, 3)(beta * uD * v);
+
+            // Extraire la temperature au point critique (0, 0)
+            T00 = u(0, 0);
+            T00C = T00 - 273.15;   // Conversion en Celsius
+
+            // Verifier la contrainte
+            valid = (T00 >= TminK) && (T00 <= TmaxK);
+
+            // Mettre a jour Vmax si valide
+            if (valid) {
+                VmaxValid = V;
+                MachVmax = iMach;
+            }
+
+            // Affichage console
+            string status;
+            if (valid) {
+                status = "OK";
+            } else {
+                status = "FAIL";
+            }
+            cout << "    Mach " << iMach << ": V=" << V << " m/s, uE=" << uE
+                 << " K, T(0,0)=" << T00 << " K (" << T00C << " C) [" << status << "]" << endl;
+
+            // Ecrire dans le fichier detaille
+            fdetail << matName << "," << Kb << "," << e << ","
+                    << iMach << "," << V << "," << alpha << "," << uE << ","
+                    << T00 << "," << T00C << ",";
+            if (valid) {
+                fdetail << "YES" << endl;
+            } else {
+                fdetail << "NO" << endl;
+            }
+
+            // Arreter si la temperature depasse largement la limite
+            if (T00 > TmaxK + 200) {
+                cout << "    [Arret anticipe: T >> limite superieure]" << endl;
+                break;
+            }
+        }
+
+        // Afficher et enregistrer Vmax pour cette configuration
+        cout << "  => Vmax = " << VmaxValid << " m/s (Mach " << MachVmax << ")" << endl;
+        fsynthesis << matName << "," << Kb << "," << e << "," << VmaxValid << "," << MachVmax << endl;
+    }
+}
+
+// Fermer les fichiers
+fdetail.flush;
+fsynthesis.flush;
+
+// -------------------------------------------------------------------------
+// SECTION 9: VISUALISATION FINALE
+// -------------------------------------------------------------------------
+// Resoudre un dernier cas pour visualisation (PICA, e=0.01, Mach 5)
+real KbVis = 0.2;
+real eVis = 0.01;
+real alphaVis = KbVis / eVis;
+real VVis = 5 * Mach1;
+real uEVis = 1e-5 * VVis * VVis;
+
+solve ThermalVis(u, v) =
+    int2d(Th)(Ka * (dx(u)*dx(v) + dy(u)*dy(v)))
+    + int1d(Th, 1)(alphaVis * u * v)
+    + int1d(Th, 3)(beta * u * v)
+    - int2d(Th)(f * v)
+    - int1d(Th, 1)(alphaVis * uEVis * v)
+    - int1d(Th, 3)(beta * uD * v);
+
+// Visualiser le champ de temperature
+plot(u, fill=true, value=true, cmm="Temperature [K] - PICA, e=0.01m, Mach 5", wait=1);
+
+// Exporter le champ de temperature pour visualisation externe
+{
+    ofstream ftemp("../data/output/csv/temperature_field_PICA_Mach5.csv");
+    ftemp << "x,y,T_K,T_C" << endl;
+    for (int i = 0; i < Th.nv; i++) {
+        ftemp << Th(i).x << "," << Th(i).y << "," << u[][i] << "," << (u[][i]-273.15) << endl;
+    }
+}
+
+// -------------------------------------------------------------------------
+// SECTION 10: RESUME FINAL
+// -------------------------------------------------------------------------
+cout << endl;
+cout << "========================================" << endl;
+cout << "SIMULATION TERMINEE" << endl;
+cout << "========================================" << endl;
+cout << endl;
+cout << "Fichiers generes:" << endl;
+cout << "  - data/output/csv/shield_results_detail.csv" << endl;
+cout << "  - data/output/csv/shield_Vmax_synthesis.csv" << endl;
+cout << "  - data/output/csv/temperature_field_PICA_Mach5.csv" << endl;
+cout << endl;
+cout << "Pour visualiser les resultats:" << endl;
+cout << "  - Ouvrir les fichiers CSV avec Excel/LibreOffice" << endl;
+cout << "  - Utiliser le script Python de post-traitement" << endl;
+cout << endl;
+cout << "========================================" << endl;
